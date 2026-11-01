@@ -92,6 +92,66 @@ function figureResolver(files, shrunk, docxImages) {
   };
 }
 
+
+// ───────────────────────────── Quality checks (shared) ─────────────────────────────
+function qualityChecksHtml(prefix, what) {
+  return `<div class="label" style="margin:4px 0 8px">Quality checks</div>
+    <label class="check"><input type="checkbox" id="${prefix}pics" checked> <span><b>Replace low-resolution pictures</b> <span class="muted small">— blurry pictures are swapped for clearer, freely licensed ones from Wikimedia Commons (credited), or sharpened</span></span></label>
+    <label class="check ${aiAvailable() ? '' : 'mode-off'}"><input type="checkbox" id="${prefix}facts" ${aiAvailable() ? 'checked' : 'disabled'}> <span><b>Update outdated information</b> <span class="muted small">— checks facts, figures and names in ${what} with Google Search and uses the current information${aiAvailable() ? '' : ' (needs AI)'}</span></span></label>`;
+}
+const newReport = () => ({ facts: [], factSources: [], searchHtml: '', factsChecked: false, pictures: [], at: Date.now() });
+
+async function runFactCheck(o, parts, report, pg) {
+  pg.step('Checking for outdated information with Google Search…', 'This adds about 10–30 seconds.');
+  try {
+    const fc = await aiSearchText([factCheckPrompt(o.text, o, S.settings), ...parts], t => pg.step(t));
+    report.facts = parseCorrections(fc.text);
+    report.factSources = fc.sources.slice(0, 12);
+    report.searchHtml = fc.searchHtml;
+    report.factsChecked = true;
+    return report.facts.length ? report.facts.map(f => `• "${f.old}" → ${f.new}`).join('\n') : '';
+  } catch (e) { console.warn(e); report.factsError = e.message.split(' (Technical')[0]; return ''; }
+}
+
+const commonsResolver = report => async term => {
+  const r = await bestCommonsPicture(term);
+  if (r) report.pictures.push({ action: 'added', term, credit: r.credit, title: r.result.title, page: r.result.page });
+  return r;
+};
+
+async function improvePictures(paper, report, pg) {
+  for (const x of (await scanPictures(paper)).filter(x => x.low)) {
+    pg.step('Replacing low-resolution pictures…');
+    const b = x.block; let done = false;
+    const prev = { image: b.image, reference: b.reference, picCredit: b.picCredit };
+    if (b.picSearch) {
+      try {
+        const r = await bestCommonsPicture(b.picSearch);
+        if (r) {
+          b._prevImage = prev;
+          b.image = r.dataUrl; b.picCredit = r.credit;
+          b.reference = [b.reference, r.credit].filter(Boolean).join(' · ');
+          report.pictures.push({ action: 'replaced', term: b.picSearch, credit: r.credit, title: r.result.title, page: r.result.page, fromDpi: x.dpi });
+          done = true;
+        }
+      } catch {}
+    }
+    if (!done) {
+      try { const sh = await sharpen(b.image); b._prevImage = prev; b.image = sh; report.pictures.push({ action: 'sharpened', term: b.picSearch || '', fromDpi: x.dpi }); } catch {}
+    }
+  }
+}
+
+function reportSummary(report) {
+  const extras = [];
+  if (report.factsChecked) extras.push(report.facts.length ? `${report.facts.length} outdated fact${report.facts.length === 1 ? '' : 's'} updated` : 'no outdated information found');
+  if (report.factsError) extras.push('the fact check could not run');
+  const np = report.pictures.length;
+  if (np) extras.push(`${np} picture${np === 1 ? '' : 's'} added or improved`);
+  return extras;
+}
+const hasReport = r => !!r && (r.factsChecked || r.factsError || r.pictures.length);
+
 // ───────────────────────────── Auto Compile ─────────────────────────────
 export async function pageCompile(view) {
   setTop('Auto Compile', 'Turn your study material into a Bloom\'s-balanced question paper');
@@ -124,9 +184,7 @@ export async function pageCompile(view) {
         <span class="muted small">Adds BRON / SOURCE extracts${aiAvailable() ? ' or tables' : ''} from the material with questions about them.</span>
       </div>
       <div id="ctarget" class="ctarget"></div>
-      <div class="label" style="margin:4px 0 8px">4. Quality checks</div>
-      <label class="check"><input type="checkbox" id="cpics" checked> <span><b>Replace low-resolution pictures</b> <span class="muted small">— blurry pictures are swapped for clearer, freely licensed ones from Wikimedia Commons (credited), or sharpened</span></span></label>
-      <label class="check ${aiAvailable() ? '' : 'mode-off'}"><input type="checkbox" id="cfacts" ${aiAvailable() ? 'checked' : 'disabled'}> <span><b>Update outdated information</b> <span class="muted small">— checks facts, figures and names with Google Search and uses the current information${aiAvailable() ? '' : ' (needs AI)'}</span></span></label>
+      ${qualityChecksHtml('c', 'the study material')}
       ${aiAvailable() ? `<label class="field"><span>Extra instructions for the AI (optional)</span><textarea class="input" id="cextra" rows="2" placeholder="e.g. Focus on chapter 3 only. Include one question about the map. Keep sentences short."></textarea></label>` : ''}
       <button class="btn btn-gold btn-lg btn-block" id="cgo">${icon('sparkle', 18)} Compile paper</button>
     </div>
@@ -159,28 +217,18 @@ export async function pageCompile(view) {
     const pg = progress('Compiling your paper');
     try {
       let blocks, engine, meta = {};
-      const report = { facts: [], factSources: [], searchHtml: '', factsChecked: false, pictures: [], at: Date.now() };
+      const report = newReport();
       if (aiAvailable() && !forceBasic) {
         const { parts, text, docxImages, shrunk } = await filesToParts(files, t => pg.step(t));
         o.text = [o.text, text].filter(Boolean).join('\n\n').slice(0, 250000);
-        if (o.facts) {
-          pg.step('Checking for outdated information with Google Search…', 'This adds about 10–30 seconds.');
-          try {
-            const fc = await aiSearchText([factCheckPrompt(o.text, o, S.settings), ...parts], t => pg.step(t));
-            report.facts = parseCorrections(fc.text);
-            report.factSources = fc.sources.slice(0, 12);
-            report.searchHtml = fc.searchHtml;
-            report.factsChecked = true;
-            if (report.facts.length) o.corrections = report.facts.map(f => `• "${f.old}" → ${f.new}`).join('\n');
-          } catch (e) { console.warn(e); report.factsError = e.message.split(' (Technical')[0]; }
-        }
+        if (o.facts) o.corrections = await runFactCheck(o, parts, report, pg);
         pg.step('Gemini is writing the questions…', 'Usually 20–60 seconds.');
         const spec = await aiJson([compilePrompt(o, S.settings), ...parts], t => pg.step(t));
         pg.step(o.pictures ? 'Building the paper and finding clear pictures…' : 'Building the paper…');
         ({ blocks } = await specToBlocks(spec, {
           lang: o.lang,
           resolveFigure: figureResolver(files, shrunk, docxImages),
-          resolvePicture: o.pictures ? async term => { const r = await bestCommonsPicture(term); if (r) report.pictures.push({ action: 'added', term, credit: r.credit, title: r.result.title, page: r.result.page }); return r; } : null
+          resolvePicture: o.pictures ? commonsResolver(report) : null
         }));
         meta = specMeta(spec, S.settings);
         engine = 'ai';
@@ -200,35 +248,12 @@ export async function pageCompile(view) {
         subject: o.subject, grade: o.grade, lang: o.lang, form: { ...o.form }, totalMarks: o.totalMarks, duration: o.duration,
         title: meta.title || '', blocks, origin: { kind: 'compiled', engine, at: Date.now() }
       });
-      if (o.pictures) {
-        for (const x of (await scanPictures(paper)).filter(x => x.low)) {
-          pg.step('Replacing low-resolution pictures…');
-          const b = x.block; let done = false;
-          if (b.picSearch) {
-            try {
-              const r = await bestCommonsPicture(b.picSearch);
-              if (r) {
-                b.image = r.dataUrl; b.picCredit = r.credit;
-                b.reference = [b.reference, r.credit].filter(Boolean).join(' · ');
-                report.pictures.push({ action: 'replaced', term: b.picSearch, credit: r.credit, title: r.result.title, page: r.result.page, fromDpi: x.dpi });
-                done = true;
-              }
-            } catch {}
-          }
-          if (!done) {
-            try { b.image = await sharpen(b.image); report.pictures.push({ action: 'sharpened', term: b.picSearch || '', fromDpi: x.dpi }); } catch {}
-          }
-        }
-      }
+      if (o.pictures) await improvePictures(paper, report, pg);
       paper.origin.report = report;
       pg.close();
       const a = analyse(paper, S.settings);
-      const extras = [];
-      if (report.factsChecked) extras.push(report.facts.length ? `${report.facts.length} outdated fact${report.facts.length === 1 ? '' : 's'} updated` : 'no outdated information found');
-      if (report.factsError) extras.push('the fact check could not run');
-      const np = report.pictures.length;
-      if (np) extras.push(`${np} picture${np === 1 ? '' : 's'} added or improved`);
-      openDraft(paper, `${engine === 'ai' ? 'Compiled by AI' : 'Compiled by the basic generator'} from your study material — ${a.total} marks${a.total !== o.totalMarks ? ` (you asked for ${o.totalMarks})` : ''}${extras.length ? '; ' + extras.join(', ') : ''}. Check every question, answer and Bloom's level, then <b>Save Paper</b>.${(report.factsChecked || np) ? ' <button class="link-btn" data-report>View the update report</button>' : ''}`);
+      const extras = reportSummary(report);
+      openDraft(paper, `${engine === 'ai' ? 'Compiled by AI' : 'Compiled by the basic generator'} from your study material — ${a.total} marks${a.total !== o.totalMarks ? ` (you asked for ${o.totalMarks})` : ''}${extras.length ? '; ' + extras.join(', ') : ''}. Check every question, answer and Bloom's level, then <b>Save Paper</b>.${hasReport(report) ? ' <button class="link-btn" data-report>View the update report</button>' : ''}`);
     } catch (e) {
       pg.close(); console.error(e);
       if (aiAvailable() && !forceBasic && /AI|Gemini|App Check|limit/i.test(e.message)) aiFailed(e.message, () => runCompile(true));
@@ -264,6 +289,7 @@ export async function pageImport(view) {
         <label class="field"><span>Grade</span><select class="input" id="igr"><option value="">Detect</option>${GRADES.map(g => `<option>${g}</option>`).join('')}</select></label>
         <label class="field"><span>Paper language</span><select class="input" id="ilang"><option value="auto">Detect</option><option value="bi">Bilingual</option><option value="af">Afrikaans</option><option value="en">English</option></select></label>
       </div>
+      ${qualityChecksHtml('i', 'the paper and its memo')}
       ${ai ? `<label class="field"><span>Extra instructions (optional)</span><textarea class="input" id="iextra" rows="2" placeholder="e.g. Leave out Question 5. Make the matching question a multiple choice question."></textarea></label>` : ''}
       <button class="btn btn-gold btn-lg btn-block" id="igo">${icon('file', 18)} Import paper</button>
       <p class="muted small" style="margin-bottom:0">Afterwards you can edit everything, preview the new layout and print it, together with a memorandum and Bloom's analysis.</p>
@@ -275,19 +301,22 @@ export async function pageImport(view) {
     if (!files.length) return toast('Add the paper file(s) first.', 'err');
     const o = {
       mode: view.querySelector('[name=imode]:checked').value, subject: $('#isub').value, grade: $('#igr').value,
-      lang: $('#ilang').value, hasMemo: $('#imemo').checked, extra: $('#iextra')?.value.trim() || ''
+      lang: $('#ilang').value, hasMemo: $('#imemo').checked, extra: $('#iextra')?.value.trim() || '',
+      pictures: $('#ipics').checked, facts: $('#ifacts').checked, kind: 'paper'
     };
     const pg = progress('Importing your paper');
     try {
       let blocks, meta = {}, notes = [], engine;
+      const report = newReport();
       if (ai && !forceBasic) {
         const { parts, text, docxImages, shrunk } = await filesToParts(files, t => pg.step(t));
         o.text = text.slice(0, 250000);
+        if (o.facts) o.corrections = await runFactCheck(o, parts, report, pg);
         pg.step(o.mode === 'keep' ? 'Gemini is reading the paper…' : o.mode === 'fix' ? 'Gemini is reading and tidying the paper…' : 'Gemini is reading and rebalancing the paper…', 'Usually 20–90 seconds, depending on the number of pages.');
         const spec = await aiJson([importPrompt(o, S.settings), ...parts], t => pg.step(t));
         pg.step('Cutting out pictures and building the paper…');
         const lang = o.lang !== 'auto' ? o.lang : (['af', 'en', 'bi'].includes(spec?.meta?.lang) ? spec.meta.lang : 'bi');
-        ({ blocks, notes } = await specToBlocks(spec, { lang, resolveFigure: figureResolver(files, shrunk, docxImages) }));
+        ({ blocks, notes } = await specToBlocks(spec, { lang, resolveFigure: figureResolver(files, shrunk, docxImages), resolvePicture: o.pictures ? commonsResolver(report) : null }));
         meta = specMeta(spec, S.settings); meta.lang = lang;
         engine = 'ai';
       } else {
@@ -331,6 +360,8 @@ export async function pageImport(view) {
       });
       if (!meta.totalMarks) paper.totalMarks = analyse(paper, S.settings).total;
       if (!meta.educators) paper.educators = (S.user.prefs || {}).educators || displayName(S.user);
+      if (o.pictures) await improvePictures(paper, report, pg);
+      paper.origin.report = report;
       pg.close();
       importResult(paper, notes, engine);
     } catch (e) {
@@ -357,6 +388,7 @@ function importResult(paper, notes, engine) {
     <p class="muted small">${esc(subjName(paper.subject))} · Grade ${esc(paper.grade)} · ${ {bi: 'Bilingual', af: 'Afrikaans', en: 'English'}[paper.lang] } · read by ${engine === 'ai' ? 'AI' : 'the basic importer'}.</p>
     ${a.planned && a.planned !== a.total ? `<div class="note note-gold" style="margin-bottom:10px">The paper says ${a.planned} marks but the questions add up to ${a.total}. Please check the marks.</div>` : ''}
     ${missing ? `<div class="note note-gold" style="margin-bottom:10px">${missing} picture${missing === 1 ? '' : 's'} could not be cut out automatically — they are marked on the paper; use <b>edit</b> to upload them.</div>` : ''}
+    ${hasReport(paper.origin.report) ? `<div class="note note-ai" style="margin-bottom:10px">${icon('sparkle', 15)} <span><b>Quality checks:</b> ${esc(reportSummary(paper.origin.report).join(', ') || 'nothing needed changing')}. <button class="link-btn" data-c="report">View the update report</button></span></div>` : ''}
     ${engine === 'basic' ? `<div class="note" style="margin-bottom:10px">The basic importer copies the question text and marks. Question types (e.g. matching), sources, pictures and memo answers may need to be set in the editor.</div>` : ''}
     <div class="choice-list">
       <button class="choice" data-c="edit">${icon('edit', 22)}<div><b>Edit the paper</b><span>Open it in the editor to change questions, marks and Bloom's levels.</span></div></button>
@@ -366,7 +398,8 @@ function importResult(paper, notes, engine) {
   });
   $$('[data-c]', m.el).forEach(b => b.onclick = async () => {
     const c = b.dataset.c;
-    if (c === 'edit') { m.close(); openDraft(paper, `Imported from <b>${esc(paper.origin.file)}</b>. Check the questions and Bloom's levels, then <b>Save Paper</b>.`); }
+    if (c === 'edit') { m.close(); const ex = reportSummary(paper.origin.report || newReport()); openDraft(paper, `Imported from <b>${esc(paper.origin.file)}</b>${ex.length ? ' — ' + ex.join(', ') : ''}. Check the questions and Bloom's levels, then <b>Save Paper</b>.${hasReport(paper.origin.report) ? ' <button class="link-btn" data-report>View the update report</button>' : ''}`); }
+    else if (c === 'report') openUpdateReport(paper);
     else if (c === 'print') {
       try { paper.updatedAt = Date.now(); await store.savePaper(paper); await refreshMyPapers(); m.close(); toast('Paper saved.'); go('#/print/' + paper.id); }
       catch (e) { toast(e.message, 'err'); }

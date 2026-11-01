@@ -213,7 +213,7 @@ Task: ${mode}
 - Copy each item's marks from the paper. Tag every item with its Bloom's level (1 Remember … 6 Create).
 - Passages, extracts, tables, maps, cartoons and pictures that questions refer to become "source" blocks (keep source letters such as BRON A / SOURCE A in "ref"). For pictures, maps and diagrams give a "figure" with the bounding box so the app can cut the picture out of the page, plus a short "description" and English "search" words inside "figure" so a sharper copy can be found if the scan is blurry.
 - Rubrics printed on the paper go into "rubric".
-- Language: ${o.lang === 'auto' ? 'detect it — if headings/questions are given in both Afrikaans and English use "bi", otherwise "af" or "en" — and set meta.lang.' : `the paper must be "${o.lang}". ${langRule(o.lang)}`}
+${o.corrections ? `- UP-TO-DATE INFORMATION: these statements in the paper were found to be outdated or incorrect. Update them wherever they appear (questions, sources and memo answers) — this is allowed even when transcribing faithfully. Change only what is needed:\n${o.corrections}\n` : ''}- Language: ${o.lang === 'auto' ? 'detect it — if headings/questions are given in both Afrikaans and English use "bi", otherwise "af" or "en" — and set meta.lang.' : `the paper must be "${o.lang}". ${langRule(o.lang)}`}
 ${o.extra ? `- Teacher's extra instructions: ${o.extra}\n` : ''}
 ${SPEC_FORMAT}
 ${o.text ? `\nTEXT EXTRACTED FROM THE UPLOADED WORD FILE(S):\n${o.text}` : ''}`;
@@ -475,8 +475,9 @@ export function basicImport(text) {
 export function factCheckPrompt(text, o, settings) {
   const subj = subjectById(settings, o.subject);
   const today = new Date().toISOString().slice(0, 10);
-  return `Today is ${today}. You are checking study material for a Grade ${o.grade} ${subj?.en || ''} test at a South African primary school (CAPS curriculum).
-Use Google Search to find statements in the material below that are OUTDATED or FACTUALLY WRONG today.
+  const what = o.kind === 'paper' ? 'an existing question paper (its questions, sources and memorandum answers)' : 'study material';
+  return `Today is ${today}. You are checking ${what} for a Grade ${o.grade || ''} ${subj?.en || ''} test at a South African primary school (CAPS curriculum).
+Use Google Search to find statements in the material below (and in any attached files) that are OUTDATED or FACTUALLY WRONG today. For a question paper, also check whether the memorandum answers are still correct.
 
 Check especially: statistics and numbers (population, records, prices, rankings), names of current office-holders and leaders, names of places, provinces, institutions and organisations that changed, laws and official policies, scientific facts that were revised, and terminology that is now considered offensive or has been replaced.
 Do NOT "update" historical facts that were true at the time they describe (e.g. "In 1994 Nelson Mandela became president" stays). Do not report spelling or style issues. Only report things you could confirm with a reliable source.
