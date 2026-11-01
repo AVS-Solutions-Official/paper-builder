@@ -158,7 +158,7 @@ export async function pageCompile(view) {
         const { parts, text } = await filesToParts(files, t => pg.step(t));
         o.text = [o.text, text].filter(Boolean).join('\n\n').slice(0, 250000);
         pg.step('Gemini is writing the questions…', 'Usually 20–60 seconds.');
-        const spec = await aiJson([compilePrompt(o, S.settings), ...parts]);
+        const spec = await aiJson([compilePrompt(o, S.settings), ...parts], t => pg.step(t));
         pg.step('Building the paper…');
         ({ blocks } = await specToBlocks(spec, { lang: o.lang }));
         meta = specMeta(spec, S.settings);
@@ -235,7 +235,7 @@ export async function pageImport(view) {
         const { parts, text, docxImages, shrunk } = await filesToParts(files, t => pg.step(t));
         o.text = text.slice(0, 250000);
         pg.step(o.mode === 'keep' ? 'Gemini is reading the paper…' : o.mode === 'fix' ? 'Gemini is reading and tidying the paper…' : 'Gemini is reading and rebalancing the paper…', 'Usually 20–90 seconds, depending on the number of pages.');
-        const spec = await aiJson([importPrompt(o, S.settings), ...parts]);
+        const spec = await aiJson([importPrompt(o, S.settings), ...parts], t => pg.step(t));
         pg.step('Cutting out pictures and building the paper…');
         const lang = o.lang !== 'auto' ? o.lang : (['af', 'en', 'bi'].includes(spec?.meta?.lang) ? spec.meta.lang : 'bi');
         ({ blocks, notes } = await specToBlocks(spec, { lang, resolveFigure: figureResolver(files, shrunk, docxImages) }));
