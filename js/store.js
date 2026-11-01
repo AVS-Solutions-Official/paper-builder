@@ -4,7 +4,7 @@
 import * as CFG from './config.js';
 const { FIREBASE_CONFIG, ALLOWED_DOMAIN, ADMIN_EMAILS } = CFG;
 // Older config.js files have no AI section — fall back to defaults.
-export const AI = { enabled: true, model: 'gemini-3.5-flash', recaptchaSiteKey: '', appCheckDebug: false, ...(CFG.AI || {}) };
+export const AI = { enabled: true, model: 'gemini-3.5-flash', recaptchaSiteKey: '', recaptchaType: 'enterprise', appCheckDebug: false, ...(CFG.AI || {}) };
 import { defaultSettings } from './bloom.js';
 
 export const isDemo = !FIREBASE_CONFIG.apiKey;
@@ -118,7 +118,8 @@ async function createFirebase() {
     try {
       if (AI.appCheckDebug) self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
       const AC = await import(`${base}/firebase-app-check.js`);
-      AC.initializeAppCheck(app, { provider: new AC.ReCaptchaV3Provider(AI.recaptchaSiteKey), isTokenAutoRefreshEnabled: true });
+      const Provider = AI.recaptchaType === 'v3' ? AC.ReCaptchaV3Provider : AC.ReCaptchaEnterpriseProvider;
+      AC.initializeAppCheck(app, { provider: new Provider(AI.recaptchaSiteKey), isTokenAutoRefreshEnabled: true });
     } catch (e) { console.warn('App Check could not start:', e); }
   }
   const auth = A.getAuth(app);
