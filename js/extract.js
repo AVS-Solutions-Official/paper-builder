@@ -180,7 +180,7 @@ export async function readPdfText(file) {
 }
 export async function pdfPageCount(file) { return (await openPdf(file)).numPages; }
 // Render one PDF page to a JPEG data URL (used to cut out maps/pictures).
-export async function renderPdfPage(file, pageNo, scale = 2) {
+export async function renderPdfPage(file, pageNo, scale = 3) {
   const doc = await openPdf(file);
   const page = await doc.getPage(Math.min(Math.max(1, pageNo), doc.numPages));
   const vp = page.getViewport({ scale });

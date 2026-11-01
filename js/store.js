@@ -22,7 +22,7 @@ export function isAdminEmail(email) {
 export function newId() {
   return (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2))).replace(/-/g, '').slice(0, 20);
 }
-const clean = o => JSON.parse(JSON.stringify(o)); // strips undefined (Firestore rejects it)
+const clean = o => JSON.parse(JSON.stringify(o, (k, v) => (k.startsWith('_') && k !== '__a') ? undefined : v)); // strips undefined + temporary _keys
 
 // Firestore cannot store an array directly inside another array (e.g. table rows).
 // Wrap inner arrays as { __a: [...] } when saving and unwrap them when reading.

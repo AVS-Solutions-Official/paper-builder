@@ -14,7 +14,7 @@ const str = v => (v == null ? '' : String(v)).trim();
 
 // ───────────────────────── AI spec → blocks ─────────────────────────
 // resolveFigure(fig) → Promise<dataUrl|''>
-export async function specToBlocks(spec, { lang = 'bi', resolveFigure } = {}) {
+export async function specToBlocks(spec, { lang = 'bi', resolveFigure, resolvePicture } = {}) {
   const blocks = [];
   const srcIds = {};
   const notes = [];
@@ -33,6 +33,15 @@ export async function specToBlocks(spec, { lang = 'bi', resolveFigure } = {}) {
         try { b.image = await resolveFigure(sb.figure); } catch { b.image = ''; }
         if (b.image) { b.sType = b.sType === 'table' ? 'table' : 'image'; b.imgWidth = 90; }
       }
+      const pic = sb.picture || null;
+      b.picSearch = str(pic?.search || sb.figure?.search || '') || str(sb.description || '');
+      if (!b.image && pic?.search && resolvePicture) {
+        try {
+          const got = await resolvePicture(str(pic.search));
+          if (got) { b.image = got.dataUrl; b.imgWidth = 80; b.sType = b.sType === 'table' ? 'table' : 'image'; b.reference = [b.reference, got.credit].filter(Boolean).join(' · '); b.picCredit = got.credit; }
+        } catch {}
+      }
+      if (pic && !b.image && !sb.figure) { b.text = (b.text ? b.text + '\n\n' : '') + `[Picture: ${str(pic.description || pic.search)} — click edit, or use “Pictures” in the toolbar, to add it]`; notes.push('missing-figure'); }
       if (sb.figure && !b.image) { b.text = (b.text ? b.text + '\n\n' : '') + `[Picture: ${str(sb.description) || 'see original paper'} — click edit to add the image]`; notes.push('missing-figure'); }
       if (!b.text && !b.image && !b.table) continue;
       if (sb.ref) srcIds[str(sb.ref).toUpperCase()] = b.id;
@@ -48,6 +57,7 @@ export async function specToBlocks(spec, { lang = 'bi', resolveFigure } = {}) {
     if (type === 'tf') { b.style = sb.tfStyle === 'correct' ? 'correct' : 'tf'; }
     if (sb.sourceRef) b.sourceRef = srcIds[str(sb.sourceRef).toUpperCase()] || '';
     if (sb.figure && resolveFigure) { try { b.image = await resolveFigure(sb.figure); } catch {} }
+    if (sb.figure?.search || sb.description) b.picSearch = str(sb.figure?.search || sb.description);
     for (const si of sb.items || []) {
       const it = newItem(type);
       it.marks = int(si.marks, type === 'paragraph' ? 5 : 1);
@@ -121,7 +131,8 @@ const SPEC_FORMAT = `Return ONLY a JSON object in exactly this format (omit fiel
     { "kind": "source", "ref": "A", "title": "optional heading", "text": "source text / passage",
       "table": [["header 1","header 2"],["row cell","row cell"]],
       "caption": "", "reference": "where the source comes from (book, website, page)",
-      "figure": { "file": 1, "page": 1, "box": [ymin, xmin, ymax, xmax] }, "description": "what the picture shows" },
+      "figure": { "file": 1, "page": 1, "box": [ymin, xmin, ymax, xmax], "search": "English search words to find a clearer copy of this picture" }, "description": "what the picture shows",
+      "picture": { "search": "Wikimedia Commons search words", "description": "what the picture should show" } },
     { "kind": "question", "type": "mcq|tf|short|paragraph|matching|fill", "sourceRef": "A",
       "instr_af": "Afrikaans instruction", "instr_en": "English instruction", "tfStyle": "tf|correct",
       "items": [
@@ -142,6 +153,7 @@ Rules for the JSON:
 - mcq: "options" without letters, "answer" = index of the correct option (0 = A). tf: "tf" true/false. matching: one item per pair, "right" is the correct match for "left".
 - fill: write each gap in "text" as ___ (three underscores); "memo" gives the missing word(s).
 - short/paragraph: "lines" = number of answer lines to print. paragraph items may have a "rubric".
+- "picture" asks the app to fetch a REAL, freely licensed picture from Wikimedia Commons (e.g. a photograph or portrait of a historical person, a historical poster, a map). Give precise English search words (e.g. "Nelson Mandela 1994", "Map of South Africa provinces"). Never describe an invented picture as if it were real.
 - "figure" only when a picture/map/diagram must be cut out of an uploaded page: "file" = number of the uploaded file (1-based), "page" = page number in that PDF (1 for photos), "box" = bounding box on a 0–1000 scale [ymin, xmin, ymax, xmax]. For Word files with [IMAGE n] markers use { "image": n } instead.`;
 
 function langRule(lang) {
@@ -174,7 +186,7 @@ Requirements:
 - Start each question with a clear instruction. Group questions in sections ("kind":"section") if the paper has more than one part.
 - Provide a memo answer for every item, and a rubric for paragraph questions. Use realistic answer "lines" (about 1 line per mark for short answers).
 - ${langRule(o.lang)}
-${o.extra ? `- Teacher's extra instructions: ${o.extra}\n` : ''}
+${o.pictures ? `- Where a picture would make a good source or help learners (a portrait or photograph of a historical figure, a map, a poster), add a "picture" with precise search words. If the uploaded material contains a clear, useful picture, you may cut it out with "figure" instead and also give its "search" words so a sharper copy can be found.\n` : ''}${o.corrections ? `- UP-TO-DATE INFORMATION: the following statements in the study material were found to be outdated or incorrect. Use the corrected information below — never test the outdated version:\n${o.corrections}\n` : ''}${o.extra ? `- Teacher's extra instructions: ${o.extra}\n` : ''}
 Set "meta" to: subject "${subj?.en || ''}", grade "${o.grade}", lang "${o.lang}", totalMarks ${o.totalMarks}, duration ${o.duration}, and a short title.
 
 ${SPEC_FORMAT}
@@ -199,7 +211,7 @@ Task: ${mode}
 - Detect the header information for "meta" (subject, grade, task number, time, total marks, date, educators, moderator, term, form of assessment). Leave out anything not shown.
 - Each VRAAG/QUESTION becomes one "question" block; its numbered sub-questions are the items. Choose the "type" that matches the layout (multiple choice → mcq, columns to match → matching, true/false → tf, gaps → fill, writing with a rubric → paragraph, everything else → short). If one question mixes styles, split it into several question blocks.
 - Copy each item's marks from the paper. Tag every item with its Bloom's level (1 Remember … 6 Create).
-- Passages, extracts, tables, maps, cartoons and pictures that questions refer to become "source" blocks (keep source letters such as BRON A / SOURCE A in "ref"). For pictures, maps and diagrams give a "figure" with the bounding box so the app can cut the picture out of the page, plus a short "description".
+- Passages, extracts, tables, maps, cartoons and pictures that questions refer to become "source" blocks (keep source letters such as BRON A / SOURCE A in "ref"). For pictures, maps and diagrams give a "figure" with the bounding box so the app can cut the picture out of the page, plus a short "description" and English "search" words inside "figure" so a sharper copy can be found if the scan is blurry.
 - Rubrics printed on the paper go into "rubric".
 - Language: ${o.lang === 'auto' ? 'detect it — if headings/questions are given in both Afrikaans and English use "bi", otherwise "af" or "en" — and set meta.lang.' : `the paper must be "${o.lang}". ${langRule(o.lang)}`}
 ${o.extra ? `- Teacher's extra instructions: ${o.extra}\n` : ''}
@@ -457,4 +469,31 @@ export function basicImport(text) {
   finishQ();
   blocks.forEach(b => { if (b.kind === 'question') b.items.forEach(i => { if (i.lines === 0 && b.type === 'short') i.lines = Math.max(1, Math.min(6, i.marks)); }); });
   return { blocks, meta };
+}
+
+// ───────────────────────── outdated-information check ─────────────────────────
+export function factCheckPrompt(text, o, settings) {
+  const subj = subjectById(settings, o.subject);
+  const today = new Date().toISOString().slice(0, 10);
+  return `Today is ${today}. You are checking study material for a Grade ${o.grade} ${subj?.en || ''} test at a South African primary school (CAPS curriculum).
+Use Google Search to find statements in the material below that are OUTDATED or FACTUALLY WRONG today.
+
+Check especially: statistics and numbers (population, records, prices, rankings), names of current office-holders and leaders, names of places, provinces, institutions and organisations that changed, laws and official policies, scientific facts that were revised, and terminology that is now considered offensive or has been replaced.
+Do NOT "update" historical facts that were true at the time they describe (e.g. "In 1994 Nelson Mandela became president" stays). Do not report spelling or style issues. Only report things you could confirm with a reliable source.
+
+Answer in EXACTLY this format, one finding per line, nothing else:
+OLD: <short quote from the material> || NEW: <the corrected, current information, written for Grade ${o.grade} learners> || WHY: <one short reason>
+If nothing is outdated, answer with exactly: NONE
+
+STUDY MATERIAL:
+${String(text || '(see attached files)').slice(0, 120000)}`;
+}
+
+export function parseCorrections(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\n+/)) {
+    const m = line.match(/OLD:\s*(.+?)\s*\|\|\s*NEW:\s*(.+?)\s*(?:\|\|\s*WHY:\s*(.+))?$/i);
+    if (m) out.push({ old: m[1].replace(/^["“]|["”]$/g, '').trim(), new: m[2].trim(), why: (m[3] || '').trim() });
+  }
+  return out.slice(0, 25);
 }

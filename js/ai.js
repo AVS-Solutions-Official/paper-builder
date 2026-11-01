@@ -10,18 +10,19 @@ export function aiStatus() {
 }
 
 const models = {};
-async function getModel(name) {
-  if (!models[name]) {
-    models[name] = (async () => {
+async function getModel(name, search = false) {
+  const key = name + (search ? ':search' : '');
+  if (!models[key]) {
+    models[key] = (async () => {
       const M = await import(`${FB_BASE}/firebase-ai.js`);
       const ai = M.getAI(firebaseApp, { backend: new M.GoogleAIBackend() });
-      return M.getGenerativeModel(ai, {
-        model: name,
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.4, maxOutputTokens: 32768 }
-      });
-    })().catch(e => { delete models[name]; throw e; });
+      return search
+        // Grounding with Google Search: plain-text answers (JSON mode is not used with tools).
+        ? M.getGenerativeModel(ai, { model: name, tools: [{ googleSearch: {} }], generationConfig: { temperature: 0.2, maxOutputTokens: 8192 } })
+        : M.getGenerativeModel(ai, { model: name, generationConfig: { responseMimeType: 'application/json', temperature: 0.4, maxOutputTokens: 32768 } });
+    })().catch(e => { delete models[key]; throw e; });
   }
-  return models[name];
+  return models[key];
 }
 
 // HTTP status of a Firebase AI error (e.g. 403, 404, 429), if known.
@@ -88,3 +89,32 @@ export async function aiJson(parts, onStatus) {
   throw new Error(friendly(lastErr));
 }
 export const aiAvailable = () => !!window.__KPS_AI_MOCK__ || aiStatus().ok;
+
+// Plain-text answer grounded with Google Search.
+// Returns { text, sources: [{ uri, title }], searchHtml, queries }.
+export async function aiSearchText(parts, onStatus) {
+  if (window.__KPS_AI_SEARCH_MOCK__) return window.__KPS_AI_SEARCH_MOCK__(parts);
+  const st = aiStatus();
+  if (!st.ok) throw new Error('AI is not available: ' + st.label);
+  let lastErr = null;
+  for (const [i, wait] of [0, 15000].entries()) {
+    if (lastErr && ![429, 500, 503].includes(statusOf(lastErr))) break;
+    if (wait) { onStatus && onStatus(`Google Search is busy — trying again in ${wait / 1000} seconds…`); await new Promise(r => setTimeout(r, wait)); }
+    try {
+      const model = await getModel(AI.model, true);
+      const r = await model.generateContent(parts);
+      const cand = r.response.candidates?.[0] || {};
+      const gm = cand.groundingMetadata || {};
+      const sources = [];
+      for (const c of gm.groundingChunks || []) {
+        const w = c.web || {};
+        if (w.uri && !sources.some(x => x.uri === w.uri)) sources.push({ uri: w.uri, title: w.title || w.domain || w.uri });
+      }
+      return { text: r.response.text(), sources, searchHtml: gm.searchEntryPoint?.renderedContent || '', queries: gm.webSearchQueries || [] };
+    } catch (e) {
+      console.error('AI search error', e, e?.customErrorData);
+      lastErr = e;
+    }
+  }
+  throw new Error(friendly(lastErr));
+}

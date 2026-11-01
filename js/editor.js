@@ -73,6 +73,7 @@ export async function renderEditor(view, { id, template, asTemplate, bank, draft
         <div class="tools-mini">
           ${tool('section', 'Section', 'section')}${tool('passage', 'Source', 'passage')}
           ${tool('fill', 'Fill in Blank', 'fill')}${tool('bank', 'From Bank', 'bank', false)}
+          ${tool('pictures', 'Pictures', 'image', false)}${tool('report', 'Update report', 'info', false)}
         </div>
         <div class="balance" id="balance"></div>
       </div>
@@ -86,6 +87,14 @@ export async function renderEditor(view, { id, template, asTemplate, bank, draft
 
   drawHead(); drawBlocks(); drawBalance();
   $('#dbx')?.addEventListener('click', e => e.currentTarget.parentElement.remove());
+  view.querySelector('[data-report]')?.addEventListener('click', () => import('./auto.js').then(m => m.openUpdateReport(E.paper)));
+  const rt = view.querySelector('[data-tool="report"]'); if (rt && !paper.origin?.report) rt.style.display = 'none';
+  // Warn about blurry pictures once when a paper opens.
+  import('./pictures.js').then(async m => {
+    const low = (await m.scanPictures(paper)).filter(x => x.low).length;
+    const pt = view.querySelector('[data-tool="pictures"]');
+    if (pt && low) { pt.classList.add('tool-warn'); pt.title = `${low} picture${low === 1 ? '' : 's'} may print blurry — click to improve`; }
+  });
   wireToolbar(view); wireCanvas(view);
   $('#save').onclick = () => save();
   $('#gen').onclick = async () => { if (await save()) go('#/print/' + E.paper.id); };
@@ -314,6 +323,8 @@ function wireToolbar(view) {
 
 function addFromTool(key, index = E.paper.blocks.length) {
   if (key === 'bank') return openBankPicker();
+  if (key === 'pictures') return import('./pictures.js').then(m => m.openPictureReview(E.paper, () => { drawBlocks(); markDirty(); }));
+  if (key === 'report') return import('./auto.js').then(m => m.openUpdateReport(E.paper));
   let b;
   if (key === 'section') b = newBlock('section');
   else if (key === 'passage') b = newBlock('source');

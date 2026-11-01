@@ -6,8 +6,9 @@ import { FORMS } from './i18n.js';
 import { newPaper, displayName } from './model.js';
 import { store } from './store.js';
 import { fileKind, fmtSize, fileToBase64, shrinkImageFile, dataUrlToBase64, readDocx, fileToText, renderPdfPage, cropImage } from './extract.js';
-import { aiJson, aiAvailable, aiStatus } from './ai.js';
-import { specToBlocks, specMeta, compilePrompt, importPrompt, basicGenerate, basicImport } from './generate.js';
+import { aiJson, aiAvailable, aiStatus, aiSearchText } from './ai.js';
+import { scanPictures, bestCommonsPicture, sharpen, MIN_DPI } from './pictures.js';
+import { specToBlocks, specMeta, compilePrompt, importPrompt, basicGenerate, basicImport, factCheckPrompt, parseCorrections } from './generate.js';
 import { openDraft } from './editor.js';
 import { renderAnalysis } from './render.js';
 
@@ -123,6 +124,9 @@ export async function pageCompile(view) {
         <span class="muted small">Adds BRON / SOURCE extracts${aiAvailable() ? ' or tables' : ''} from the material with questions about them.</span>
       </div>
       <div id="ctarget" class="ctarget"></div>
+      <div class="label" style="margin:4px 0 8px">4. Quality checks</div>
+      <label class="check"><input type="checkbox" id="cpics" checked> <span><b>Replace low-resolution pictures</b> <span class="muted small">— blurry pictures are swapped for clearer, freely licensed ones from Wikimedia Commons (credited), or sharpened</span></span></label>
+      <label class="check ${aiAvailable() ? '' : 'mode-off'}"><input type="checkbox" id="cfacts" ${aiAvailable() ? 'checked' : 'disabled'}> <span><b>Update outdated information</b> <span class="muted small">— checks facts, figures and names with Google Search and uses the current information${aiAvailable() ? '' : ' (needs AI)'}</span></span></label>
       ${aiAvailable() ? `<label class="field"><span>Extra instructions for the AI (optional)</span><textarea class="input" id="cextra" rows="2" placeholder="e.g. Focus on chapter 3 only. Include one question about the map. Keep sentences short."></textarea></label>` : ''}
       <button class="btn btn-gold btn-lg btn-block" id="cgo">${icon('sparkle', 18)} Compile paper</button>
     </div>
@@ -147,20 +151,37 @@ export async function pageCompile(view) {
       totalMarks: Math.max(5, Number($('#ctot').value) || 40), duration: Number($('#cdur').value) || 60,
       types: $$('[data-ty]', view).filter(c => c.checked).map(c => c.dataset.ty),
       sourceBased: $('#csrc').checked, sourceCount: Number($('#csrcn').value),
-      extra: $('#cextra')?.value.trim() || '', text: $('#mat').value.trim()
+      extra: $('#cextra')?.value.trim() || '', text: $('#mat').value.trim(),
+      pictures: $('#cpics').checked, facts: $('#cfacts').checked
     };
     if (!o.types.length) return toast('Choose at least one question type.', 'err');
     if (!o.text && !files.length) return toast('Paste some study material or add a file first.', 'err');
     const pg = progress('Compiling your paper');
     try {
       let blocks, engine, meta = {};
+      const report = { facts: [], factSources: [], searchHtml: '', factsChecked: false, pictures: [], at: Date.now() };
       if (aiAvailable() && !forceBasic) {
-        const { parts, text } = await filesToParts(files, t => pg.step(t));
+        const { parts, text, docxImages, shrunk } = await filesToParts(files, t => pg.step(t));
         o.text = [o.text, text].filter(Boolean).join('\n\n').slice(0, 250000);
+        if (o.facts) {
+          pg.step('Checking for outdated information with Google Search…', 'This adds about 10–30 seconds.');
+          try {
+            const fc = await aiSearchText([factCheckPrompt(o.text, o, S.settings), ...parts], t => pg.step(t));
+            report.facts = parseCorrections(fc.text);
+            report.factSources = fc.sources.slice(0, 12);
+            report.searchHtml = fc.searchHtml;
+            report.factsChecked = true;
+            if (report.facts.length) o.corrections = report.facts.map(f => `• "${f.old}" → ${f.new}`).join('\n');
+          } catch (e) { console.warn(e); report.factsError = e.message.split(' (Technical')[0]; }
+        }
         pg.step('Gemini is writing the questions…', 'Usually 20–60 seconds.');
         const spec = await aiJson([compilePrompt(o, S.settings), ...parts], t => pg.step(t));
-        pg.step('Building the paper…');
-        ({ blocks } = await specToBlocks(spec, { lang: o.lang }));
+        pg.step(o.pictures ? 'Building the paper and finding clear pictures…' : 'Building the paper…');
+        ({ blocks } = await specToBlocks(spec, {
+          lang: o.lang,
+          resolveFigure: figureResolver(files, shrunk, docxImages),
+          resolvePicture: o.pictures ? async term => { const r = await bestCommonsPicture(term); if (r) report.pictures.push({ action: 'added', term, credit: r.credit, title: r.result.title, page: r.result.page }); return r; } : null
+        }));
         meta = specMeta(spec, S.settings);
         engine = 'ai';
       } else {
@@ -179,9 +200,35 @@ export async function pageCompile(view) {
         subject: o.subject, grade: o.grade, lang: o.lang, form: { ...o.form }, totalMarks: o.totalMarks, duration: o.duration,
         title: meta.title || '', blocks, origin: { kind: 'compiled', engine, at: Date.now() }
       });
+      if (o.pictures) {
+        for (const x of (await scanPictures(paper)).filter(x => x.low)) {
+          pg.step('Replacing low-resolution pictures…');
+          const b = x.block; let done = false;
+          if (b.picSearch) {
+            try {
+              const r = await bestCommonsPicture(b.picSearch);
+              if (r) {
+                b.image = r.dataUrl; b.picCredit = r.credit;
+                b.reference = [b.reference, r.credit].filter(Boolean).join(' · ');
+                report.pictures.push({ action: 'replaced', term: b.picSearch, credit: r.credit, title: r.result.title, page: r.result.page, fromDpi: x.dpi });
+                done = true;
+              }
+            } catch {}
+          }
+          if (!done) {
+            try { b.image = await sharpen(b.image); report.pictures.push({ action: 'sharpened', term: b.picSearch || '', fromDpi: x.dpi }); } catch {}
+          }
+        }
+      }
+      paper.origin.report = report;
       pg.close();
       const a = analyse(paper, S.settings);
-      openDraft(paper, `${engine === 'ai' ? 'Compiled by AI' : 'Compiled by the basic generator'} from your study material — ${a.total} marks${a.total !== o.totalMarks ? ` (you asked for ${o.totalMarks})` : ''}. Check every question, answer and Bloom's level, then <b>Save Paper</b>.`);
+      const extras = [];
+      if (report.factsChecked) extras.push(report.facts.length ? `${report.facts.length} outdated fact${report.facts.length === 1 ? '' : 's'} updated` : 'no outdated information found');
+      if (report.factsError) extras.push('the fact check could not run');
+      const np = report.pictures.length;
+      if (np) extras.push(`${np} picture${np === 1 ? '' : 's'} added or improved`);
+      openDraft(paper, `${engine === 'ai' ? 'Compiled by AI' : 'Compiled by the basic generator'} from your study material — ${a.total} marks${a.total !== o.totalMarks ? ` (you asked for ${o.totalMarks})` : ''}${extras.length ? '; ' + extras.join(', ') : ''}. Check every question, answer and Bloom's level, then <b>Save Paper</b>.${(report.factsChecked || np) ? ' <button class="link-btn" data-report>View the update report</button>' : ''}`);
     } catch (e) {
       pg.close(); console.error(e);
       if (aiAvailable() && !forceBasic && /AI|Gemini|App Check|limit/i.test(e.message)) aiFailed(e.message, () => runCompile(true));
@@ -338,4 +385,28 @@ function aiFailed(msg, retryBasic) {
     footer: `<button class="btn btn-ghost" data-close>Close</button><button class="btn btn-gold" id="usebasic">Use the built-in generator</button>`
   });
   $('#usebasic', m.el).onclick = () => { m.close(); retryBasic(); };
+}
+
+// Report of what the quality checks changed (facts updated, pictures replaced).
+export function openUpdateReport(paper) {
+  const r = paper.origin?.report;
+  if (!r) return toast('There is no update report for this paper.', 'info');
+  const m = openModal({
+    title: 'Update report', wide: true,
+    body: `
+      <h3 style="margin-bottom:8px">Outdated information</h3>
+      ${!r.factsChecked ? `<p class="muted">${r.factsError ? 'The fact check could not run: ' + esc(r.factsError) : 'The fact check was not switched on for this paper.'}</p>`
+        : r.facts.length ? `<table class="table rep-table"><thead><tr><th>In the study material</th><th>Used on the paper instead</th></tr></thead><tbody>
+            ${r.facts.map(f => `<tr><td><s>${esc(f.old)}</s></td><td><b>${esc(f.new)}</b>${f.why ? `<div class="small muted">${esc(f.why)}</div>` : ''}</td></tr>`).join('')}</tbody></table>`
+        : '<p class="muted">No outdated information was found in the study material.</p>'}
+      ${r.factSources?.length ? `<div class="small" style="margin-top:10px"><b>Sources checked:</b><ol class="src-list">${r.factSources.map(s => `<li><a href="${esc(s.uri)}" target="_blank" rel="noopener">${esc(s.title)}</a></li>`).join('')}</ol></div>` : ''}
+      ${r.searchHtml ? `<div class="small muted" style="margin:8px 0 4px">Google Search suggestions:</div><iframe class="gsearch" sandbox="allow-popups allow-popups-to-escape-sandbox" title="Google Search suggestions"></iframe>` : ''}
+      <p class="small muted">Please double-check updated facts before printing — the AI can make mistakes.</p>
+      <h3 style="margin:18px 0 8px">Pictures</h3>
+      ${r.pictures?.length ? `<ul class="rep-pics">${r.pictures.map(p => `<li>${p.action === 'sharpened' ? `A low-resolution picture (${p.fromDpi} dpi) was <b>sharpened</b>${p.term ? ` — no clearer copy of “${esc(p.term)}” was found` : ''}.` : `${p.action === 'replaced' ? `A low-resolution picture (${p.fromDpi} dpi) was <b>replaced</b>` : 'A picture was <b>added</b>'}: <a href="${esc(p.page || '#')}" target="_blank" rel="noopener">${esc(p.title || p.term)}</a><div class="small muted">${esc(p.credit || '')}</div>`}</li>`).join('')}</ul>`
+        : '<p class="muted">No pictures needed replacing.</p>'}
+      <p class="small muted">Use <b>Pictures</b> in the toolbar to choose a different picture, sharpen one, or upload your own.</p>`
+  });
+  const fr = $('.gsearch', m.el);
+  if (fr) fr.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0">${r.searchHtml}</body></html>`;
 }
