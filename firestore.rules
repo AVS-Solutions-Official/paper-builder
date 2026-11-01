@@ -24,7 +24,7 @@ service cloud.firestore {
     }
     function admin() {
       return staff() && request.auth.token.email.lower() in [
-        'admin@kathuonline.com'
+        'andr.vanschalkwyk@kathuonline.com'
       ];
     }
 

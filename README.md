@@ -97,16 +97,17 @@ Commit the change. In a minute the live site switches from demo mode to real acc
 ### 4. Switch on the AI features (about 10 minutes)
 
 1. Firebase Console → **AI Services → AI Logic → Get started** → choose **Gemini Developer API** (free; no Blaze plan needed) → finish the steps.
-2. Firebase requires **App Check** for AI Logic. Create a free reCAPTCHA v3 key at <https://www.google.com/recaptcha/admin/create>:
-   type **Score based (v3)**, domain **`avs-solutions-official.github.io`** (and `localhost` if you test locally). Copy the **site key** and the **secret key**.
-3. Firebase Console → **Build → App Check → Apps** → your web app → **reCAPTCHA** → paste the **secret key** → Save. Under **APIs**, make sure **Firebase AI Logic** is enforced (Cloud Firestore can stay *unenforced*).
-4. In `js/config.js` paste the **site key**:
+2. Firebase requires **App Check** for AI Logic. Create a reCAPTCHA key (free on the Spark plan) in Google Cloud **Fraud Defense**:
+   <https://console.cloud.google.com/security/recaptcha?project=kathu-paper-builder> → enable the API if asked → **Create key** → type **Website**, domain **`avs-solutions-official.github.io`**, leave **“Use checkbox challenge” unticked** → **Create**. Copy the key ID.
+3. Firebase Console → **Security → App Check → Apps** → your web app → **reCAPTCHA Enterprise** → paste the key → Save.
+4. In `js/config.js` set:
 
    ```js
    export const AI = {
      enabled: true,
      model: "gemini-3.5-flash",
-     recaptchaSiteKey: "6Lc…your site key…",
+     recaptchaSiteKey: "6L…your key…",
+     recaptchaType: "enterprise",
      appCheckDebug: false
    };
    ```
