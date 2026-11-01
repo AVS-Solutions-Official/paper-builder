@@ -5,6 +5,7 @@ import { esc, nl2br, icon, toast, openModal, confirmBox, $, $$, readImage } from
 import { LEVELS, ORDERS, ORDER_LABEL, analyse, blockMarks, levelByN, suggestLevel, subjectById } from './bloom.js';
 import { t, TYPE_INFO, DEFAULT_INSTR, FORMS, formatDuration } from './i18n.js';
 import { newPaper, newBlock, newItem, cloneBlock, clonePaper, shuffleKeys, displayName } from './model.js';
+import { drawChart, normaliseChart } from './charts.js';
 import { numberBlocks, sectionMarks, matchingColumnB, matchingAnswer, renderAnalysis, rubricMax, sourceLetters, sourceLabel } from './render.js';
 
 let E = null; // editor state { paper, dirty, isNew }
@@ -538,6 +539,19 @@ function openBlockEditor(orig, { isNew = false, index } = {}) {
       <button type="button" class="btn btn-ghost btn-sm" data-a="tRemove">${icon('trash', 14)} Remove table</button></div>
       <small class="muted">Tip: you can paste rows copied from Excel or Word into the first cell.</small>`;
   };
+  const chartEditor = () => {
+    const c = W.chart;
+    if (!c) return `<button type="button" class="btn btn-outline btn-sm" data-a="addChart" data-v="climate">${icon('plus', 15)} Climate graph</button> <button type="button" class="btn btn-outline btn-sm" data-a="addChart" data-v="bar">${icon('plus', 15)} Bar / line / pie graph</button><small class="muted" style="display:block;margin-top:6px">The app draws a clear, print-ready graph from the numbers you type.</small>`;
+    const prev = drawChart(c);
+    return `<div class="grid-2"><label class="field"><span>Graph type</span><select class="input" data-f="chart.type" data-redraw>${[['climate', 'Climate graph (rain bars + temperature line)'], ['bar', 'Bar graph'], ['line', 'Line graph'], ['pie', 'Pie chart']].map(([v, l]) => `<option value="${v}" ${c.type === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field"><span>Graph title</span><input class="input" data-f="chart.title" value="${esc(c.title)}" placeholder="e.g. Climate graph of Upington"></label></div>
+      <div class="table-wrap"><table class="rub-table chart-tbl"><thead><tr><th>Label</th>${c.series.map((sr, j) => `<th><input class="input" data-f="chart.series.${j}.name" value="${esc(sr.name)}" placeholder="Series name"><input class="input" data-f="chart.series.${j}.unit" value="${esc(sr.unit)}" placeholder="unit e.g. mm" style="font-weight:400"></th>`).join('')}<th style="width:34px"></th></tr></thead>
+      <tbody>${c.labels.map((lb, i) => `<tr><td><input class="input" data-f="chart.labels.${i}" value="${esc(lb)}"></td>${c.series.map((sr, j) => `<td><input class="input" inputmode="decimal" data-f="chart.series.${j}.values.${i}" value="${esc(sr.values[i])}"></td>`).join('')}<td>${c.type === 'climate' ? '' : `<button type="button" class="icon-btn" style="width:28px;height:28px;border:0;box-shadow:none" data-a="cDelRow" data-i="${i}" aria-label="Remove row">${icon('x', 13)}</button>`}</td></tr>`).join('')}</tbody></table></div>
+      <div class="row" style="margin-top:6px">${c.type === 'climate' ? '' : `<button type="button" class="btn btn-ghost btn-sm" data-a="cAddRow">${icon('plus', 14)} Row</button>${c.type === 'pie' ? '' : `<button type="button" class="btn btn-ghost btn-sm" data-a="cAddSeries">${icon('plus', 14)} Series</button>`}`}
+        <button type="button" class="btn btn-outline btn-sm" data-a="cRedraw">${icon('sparkle', 14)} Redraw preview</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-a="cRemove">${icon('trash', 14)} Remove graph</button></div>
+      ${prev ? `<img class="img-prev" src="${prev}" alt="Graph preview" style="margin-top:10px;max-height:260px">` : ''}`;
+  };
   const sourceRefField = () => {
     const letters = sourceLetters(E.paper);
     const srcs = E.paper.blocks.filter(x => x.kind === 'source' && letters[x.id]);
@@ -563,7 +577,8 @@ function openBlockEditor(orig, { isNew = false, index } = {}) {
         </div>
         ${W._pickImage ? '' : `<label class="field"><span>Text / extract</span><textarea class="input" rows="7" data-f="text" autofocus placeholder="Paste or type the passage, extract, diary entry, letter…">${esc(W.text)}</textarea></label>`}
         <details ${W.sType === 'table' ? 'open' : ''} style="margin-bottom:12px"><summary class="label" style="cursor:pointer">Table (statistics, timeline, comparison…)</summary><div style="margin-top:10px">${tableEditor()}</div></details>
-        <details ${W.image || W._pickImage ? 'open' : ''} style="margin-bottom:12px"><summary class="label" style="cursor:pointer">Picture, map, cartoon or graph</summary><div style="margin-top:10px">${imageField(W._pickImage ? 'Image' : 'Image (optional)')}</div></details>
+        <details ${W.chart ? 'open' : ''} style="margin-bottom:12px"><summary class="label" style="cursor:pointer">Graph drawn from data (climate graph, bar, line, pie)</summary><div style="margin-top:10px">${chartEditor()}</div></details>
+        ${W.chart ? '' : `<details ${W.image || W._pickImage ? 'open' : ''} style="margin-bottom:12px"><summary class="label" style="cursor:pointer">Picture, map, cartoon or scanned graph</summary>`}${W.chart ? '' : `<div style="margin-top:10px">${imageField(W._pickImage ? 'Image' : 'Image (optional)')}</div></details>`}
         <label class="field"><span>Reference / acknowledgement (optional)</span><input class="input" data-f="reference" value="${esc(W.reference)}" placeholder="e.g. Oxford Successful Social Sciences Gr 6, p. 45"><small>Printed small under the source, e.g. “Bron / Source: …”.</small></label>
         <label class="check"><input type="checkbox" data-f="boxed" data-bool-check ${W.boxed !== false ? 'checked' : ''}> Draw a border around it</label>`;
     } else {
@@ -610,7 +625,7 @@ function openBlockEditor(orig, { isNew = false, index } = {}) {
       const c = $('[data-colb]', body); if (c) c.innerHTML = colBPreview();
     }
   });
-  body.addEventListener('change', e => { if (e.target.dataset.redraw !== undefined) draw(); });
+  body.addEventListener('change', e => { if (e.target.dataset.redraw !== undefined) { if (W.chart) W.chart = normaliseChart(W.chart); draw(); } });
   body.addEventListener('paste', e => {
     const f = e.target.dataset?.f || '';
     const m = f.match(/^table\.rows\.(\d+)\.(\d+)$/);
@@ -646,6 +661,17 @@ function openBlockEditor(orig, { isNew = false, index } = {}) {
     else if (a === 'rmImg') { W.image = ''; W.caption = ''; }
     else if (a === 'resetInstr') { const k = W.type === 'tf' && W.style === 'correct' ? 'tfcorrect' : W.type; W.instr = { ...DEFAULT_INSTR[k] }; }
     else if (a === 'style') { W.style = b.dataset.v; const def = DEFAULT_INSTR[W.style === 'correct' ? 'tf' : 'tfcorrect']; if (W.instr.af === def.af) W.instr = { ...DEFAULT_INSTR[W.style === 'correct' ? 'tfcorrect' : 'tf'] }; }
+    else if (a === 'addChart') {
+      W.chart = b.dataset.v === 'climate'
+        ? normaliseChart({ type: 'climate', title: '', series: [{ name: 'Rainfall', unit: 'mm', values: Array(12).fill(0) }, { name: 'Temperature', unit: '°C', values: Array(12).fill(0) }] })
+        : normaliseChart({ type: 'bar', title: '', labels: ['A', 'B', 'C', 'D'], series: [{ name: 'Value', unit: '', values: [0, 0, 0, 0] }] });
+      W.sType = 'chart';
+    }
+    else if (a === 'cAddRow') { W.chart.labels.push(''); W.chart.series.forEach(sr => sr.values.push(0)); }
+    else if (a === 'cDelRow') { W.chart.labels.splice(i, 1); W.chart.series.forEach(sr => sr.values.splice(i, 1)); }
+    else if (a === 'cAddSeries') W.chart.series.push({ name: '', unit: '', kind: 'bar', axis: 'left', values: W.chart.labels.map(() => 0) });
+    else if (a === 'cRedraw') { W.chart = normaliseChart(W.chart); }
+    else if (a === 'cRemove') { W.chart = null; W.image = ''; W.sType = 'text'; }
     else if (a === 'addTable') { W.table = { rows: [['', '', ''], ['', '', ''], ['', '', '']], header: true }; W.sType = 'table'; }
     else if (a === 'tAddRow') W.table.rows.push(W.table.rows[0].map(() => ''));
     else if (a === 'tAddCol') W.table.rows.forEach(r => r.push(''));
@@ -662,8 +688,9 @@ function openBlockEditor(orig, { isNew = false, index } = {}) {
 
   $('#wok', m.el).onclick = () => {
     if (W.kind === 'question' && !W.items.length) return toast('Add at least one item first.', 'err');
-    if (W.kind === 'source' && !W.text && !W.image && !W.title && !W.table?.rows?.length) return toast('Add some text, a table or an image first.', 'err');
-    if (W.kind === 'source') W.sType = W.table?.rows?.length ? 'table' : W.image ? 'image' : 'text';
+    if (W.kind === 'source' && !W.text && !W.image && !W.title && !W.table?.rows?.length && !W.chart) return toast('Add some text, a table or an image first.', 'err');
+    if (W.kind === 'source' && W.chart) { W.chart = normaliseChart(W.chart); W.image = drawChart(W.chart); W.imgWidth = W.imgWidth || 85; }
+    if (W.kind === 'source') W.sType = W.chart ? 'chart' : W.table?.rows?.length ? 'table' : W.image ? 'image' : 'text';
     delete W._pickImage;
     if (W.type === 'mcq') W.items.forEach(it => { it.options = it.options.map(o => o.trim()); });
     if (isNew) E.paper.blocks.splice(index ?? E.paper.blocks.length, 0, W);

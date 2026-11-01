@@ -7,6 +7,7 @@ import { newId } from './store.js';
 import { newBlock, newItem, shuffleKeys } from './model.js';
 import { DEFAULT_INSTR } from './i18n.js';
 import { LEVELS, ORDERS, suggestLevel, subjectById } from './bloom.js';
+import { drawChart, normaliseChart } from './charts.js';
 
 const TYPES = ['mcq', 'tf', 'short', 'paragraph', 'matching', 'fill'];
 const int = (v, d = 0) => { const n = parseInt(v, 10); return isNaN(n) ? d : Math.max(0, n); };
@@ -29,13 +30,18 @@ export async function specToBlocks(spec, { lang = 'bi', resolveFigure, resolvePi
       b.title = str(sb.title).replace(/^(bron|source|bylaag|addendum)\s+[a-z0-9]+\s*[:.\-/]?\s*((bron|source)\s+[a-z0-9]+\s*[:.-]?\s*)?/i, '');
       b.text = str(sb.text); b.caption = str(sb.caption); b.reference = str(sb.reference);
       if (Array.isArray(sb.table) && sb.table.length) { b.sType = 'table'; b.table = { rows: sb.table.map(r => (Array.isArray(r) ? r : [r]).map(str)), header: true }; }
-      if (sb.figure && resolveFigure) {
+      if (sb.chart) {
+        const ch = normaliseChart(sb.chart);
+        const img = ch && drawChart(ch);
+        if (img) { b.chart = ch; b.image = img; b.sType = 'chart'; b.imgWidth = 85; }
+      }
+      if (sb.figure && resolveFigure && !b.image) {
         try { b.image = await resolveFigure(sb.figure); } catch { b.image = ''; }
         if (b.image) { b.sType = b.sType === 'table' ? 'table' : 'image'; b.imgWidth = 90; }
       }
       const pic = sb.picture || null;
       b.picSearch = str(pic?.search || sb.figure?.search || '') || str(sb.description || '');
-      if (!b.image && pic?.search && resolvePicture) {
+      if (!b.image && !b.chart && pic?.search && resolvePicture) {
         try {
           const got = await resolvePicture(str(pic.search));
           if (got) { b.image = got.dataUrl; b.imgWidth = 80; b.sType = b.sType === 'table' ? 'table' : 'image'; b.reference = [b.reference, got.credit].filter(Boolean).join(' · '); b.picCredit = got.credit; }
@@ -56,7 +62,8 @@ export async function specToBlocks(spec, { lang = 'bi', resolveFigure, resolvePi
     if (lang === 'af' && !b.instr.af) b.instr.af = DEFAULT_INSTR[type]?.af || '';
     if (type === 'tf') { b.style = sb.tfStyle === 'correct' ? 'correct' : 'tf'; }
     if (sb.sourceRef) b.sourceRef = srcIds[str(sb.sourceRef).toUpperCase()] || '';
-    if (sb.figure && resolveFigure) { try { b.image = await resolveFigure(sb.figure); } catch {} }
+    if (sb.chart) { const ch = normaliseChart(sb.chart); const img = ch && drawChart(ch); if (img) { b.chart = ch; b.image = img; b.imgWidth = 75; } }
+    if (sb.figure && resolveFigure && !b.image) { try { b.image = await resolveFigure(sb.figure); } catch {} }
     if (sb.figure?.search || sb.description) b.picSearch = str(sb.figure?.search || sb.description);
     for (const si of sb.items || []) {
       const it = newItem(type);
@@ -132,7 +139,9 @@ const SPEC_FORMAT = `Return ONLY a JSON object in exactly this format (omit fiel
       "table": [["header 1","header 2"],["row cell","row cell"]],
       "caption": "", "reference": "where the source comes from (book, website, page)",
       "figure": { "file": 1, "page": 1, "box": [ymin, xmin, ymax, xmax], "search": "English search words to find a clearer copy of this picture" }, "description": "what the picture shows",
-      "picture": { "search": "Wikimedia Commons search words", "description": "what the picture should show" } },
+      "picture": { "search": "Wikimedia Commons search words", "description": "what the picture should show" },
+      "chart": { "type": "climate|bar|line|pie", "title": "Climate graph of Upington", "xLabel": "", "labels": ["J","F","M","A","M","J","J","A","S","O","N","D"],
+                 "series": [ { "name": "Rainfall", "unit": "mm", "values": [33,40,48,30,12,5,3,4,6,15,20,25] }, { "name": "Temperature", "unit": "°C", "values": [27,26,24,19,15,11,11,13,17,21,24,26] } ] } },
     { "kind": "question", "type": "mcq|tf|short|paragraph|matching|fill", "sourceRef": "A",
       "instr_af": "Afrikaans instruction", "instr_en": "English instruction", "tfStyle": "tf|correct",
       "items": [
@@ -154,6 +163,7 @@ Rules for the JSON:
 - fill: write each gap in "text" as ___ (three underscores); "memo" gives the missing word(s).
 - short/paragraph: "lines" = number of answer lines to print. paragraph items may have a "rubric".
 - "picture" asks the app to fetch a REAL, freely licensed picture from Wikimedia Commons (e.g. a photograph or portrait of a historical person, a historical poster, a map). Give precise English search words (e.g. "Nelson Mandela 1994", "Map of South Africa provinces"). Never describe an invented picture as if it were real.
+- "chart" makes the app DRAW a graph from data (do not use "figure" or "picture" for graphs you can describe with numbers): "climate" = climate graph (12 monthly rainfall bars in mm + temperature line in °C), "bar", "line" or "pie" (one series). Use realistic data and give the real place/source in "title"/"reference".
 - "figure" only when a picture/map/diagram must be cut out of an uploaded page: "file" = number of the uploaded file (1-based), "page" = page number in that PDF (1 for photos), "box" = bounding box on a 0–1000 scale [ymin, xmin, ymax, xmax]. For Word files with [IMAGE n] markers use { "image": n } instead.`;
 
 function langRule(lang) {
@@ -201,6 +211,15 @@ export function importPrompt(o, settings) {
   const mode = {
     keep: 'Transcribe the paper FAITHFULLY. Keep the original wording, questions, marks and order exactly. Only fix obvious typing/scanning errors.',
     fix: 'Transcribe the paper, keeping every question and its meaning, but correct spelling, grammar and punctuation, make instructions clear and consistent, fix numbering, and make sure each question\'s marks add up correctly.',
+    variant: `Create a NEW VERSION of this paper (e.g. for a re-test or another class) that tests EXACTLY the same knowledge and skills, but with different specific content, so learners cannot simply copy answers from the original.
+Rules for the new version:
+  • Keep the same structure: same sections, same number of questions and items, same question types, the same marks per item and the same total, and the SAME Bloom's level for each item.
+  • Each new item must test the same concept/skill as the item it replaces, at the same difficulty.
+  • ${o.variation === 'more' ? 'Change it clearly: use different examples, places, people (from the same topic), numbers and wording; you may ask a different question about the same concept.' : 'Change it lightly: keep each question recognisable but change the specific examples, numbers, places, names and option order.'}
+  • Multiple choice: change the options and the position of the correct answer. Matching: use different pairs from the same topic and a new order. True/False: new statements with a different mix of true/false.
+  • SOURCES: replace every source with an EQUIVALENT one. A climate graph becomes a climate graph of a DIFFERENT real place with a comparable climate type (use realistic climate data and draw it with "chart" type "climate"); other graphs become a similar graph with new realistic data ("chart"); tables get new data; text extracts become a different extract of similar length on the same topic; maps, photos and cartoons become a comparable picture of a different place/example ("picture" with precise search words). Use "figure" (copying the original picture) ONLY for a generic diagram that cannot be substituted.
+  • Questions about a source must be rewritten to match the NEW source, and every memo answer must be correct for the new version — work out answers from the new data (e.g. read the new graph's highest rainfall month).
+  • Keep the same language(s), grade level and instructions style.`,
     rebalance: `Transcribe the paper and IMPROVE it so that its Bloom's taxonomy balance meets the subject's targets${t ? ` (by marks: lower order ${t[0]}%, middle order ${t[1]}%, higher order ${t[2]}%)` : ''} while keeping the same topic, the same total marks and the overall structure. Keep good questions as they are; rewrite or replace only as many questions as needed (e.g. turn a recall question into an analysis or evaluation question). Also fix spelling and grammar.`
   }[o.mode];
   return `You are helping Kathu Primary School (South Africa) re-type an existing question paper into their paper-building app.

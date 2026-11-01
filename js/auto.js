@@ -281,9 +281,12 @@ export async function pageImport(view) {
       <div class="mode-cards">
         ${[['keep', 'Improve the look', 'Keep the wording exactly, and re-set it in the school layout (header box, VRAAG numbering, marks, answer lines).', true],
            ['fix', 'Improve the look + tidy the language', 'Also correct spelling and grammar, make instructions clear and numbering consistent.', ai],
-           ['rebalance', "Rebalance Bloom's levels", "Also rewrite some questions so the paper meets the subject's lower / middle / higher order targets.", ai]]
+           ['rebalance', "Rebalance Bloom's levels", "Also rewrite some questions so the paper meets the subject's lower / middle / higher order targets.", ai],
+           ['variant', 'Make a new version', 'Same knowledge, Bloom’s levels and marks — but different questions, examples and sources (e.g. a different climate graph). Ideal for a re-test or another class.', ai]]
           .map(([v, t, d, on], i) => `<label class="mode ${on ? '' : 'mode-off'}"><input type="radio" name="imode" value="${v}" ${i === 0 ? 'checked' : ''} ${on ? '' : 'disabled'}><div><b>${t}</b><div class="muted small">${d}${on ? '' : ' <i>(needs AI)</i>'}</div></div></label>`).join('')}
       </div>
+      <div class="field hidden" id="ivarbox" style="margin-top:10px"><span>How different should the new version be?</span>
+        <div class="seg" id="ivar"><button type="button" data-v="light" class="on">A little — same questions, new examples &amp; numbers</button><button type="button" data-v="more">Clearly — new questions on the same knowledge</button></div></div>
       <div class="grid-3" style="margin-top:12px">
         <label class="field"><span>Subject</span><select class="input" id="isub"><option value="">Detect from paper</option>${S.settings.subjects.map(s => `<option value="${s.id}">${esc(s.en)}</option>`).join('')}</select></label>
         <label class="field"><span>Grade</span><select class="input" id="igr"><option value="">Detect</option>${GRADES.map(g => `<option>${g}</option>`).join('')}</select></label>
@@ -296,13 +299,16 @@ export async function pageImport(view) {
     </div>
   </div>`;
   filePicker($('#ifiles', view), files, {});
+  let variation = 'light';
+  view.addEventListener('change', e => { if (e.target.name === 'imode') $('#ivarbox').classList.toggle('hidden', e.target.value !== 'variant'); });
+  $$('#ivar button', view).forEach(b => b.onclick = () => { variation = b.dataset.v; $$('#ivar button', view).forEach(x => x.classList.toggle('on', x === b)); });
 
   const runImport = async (forceBasic = false) => {
     if (!files.length) return toast('Add the paper file(s) first.', 'err');
     const o = {
       mode: view.querySelector('[name=imode]:checked').value, subject: $('#isub').value, grade: $('#igr').value,
       lang: $('#ilang').value, hasMemo: $('#imemo').checked, extra: $('#iextra')?.value.trim() || '',
-      pictures: $('#ipics').checked, facts: $('#ifacts').checked, kind: 'paper'
+      pictures: $('#ipics').checked, facts: $('#ifacts').checked, kind: 'paper', variation
     };
     const pg = progress('Importing your paper');
     try {
@@ -312,11 +318,11 @@ export async function pageImport(view) {
         const { parts, text, docxImages, shrunk } = await filesToParts(files, t => pg.step(t));
         o.text = text.slice(0, 250000);
         if (o.facts) o.corrections = await runFactCheck(o, parts, report, pg);
-        pg.step(o.mode === 'keep' ? 'Gemini is reading the paper…' : o.mode === 'fix' ? 'Gemini is reading and tidying the paper…' : 'Gemini is reading and rebalancing the paper…', 'Usually 20–90 seconds, depending on the number of pages.');
+        pg.step(o.mode === 'keep' ? 'Gemini is reading the paper…' : o.mode === 'fix' ? 'Gemini is reading and tidying the paper…' : o.mode === 'variant' ? 'Gemini is writing a new version of the paper…' : 'Gemini is reading and rebalancing the paper…', 'Usually 20–90 seconds, depending on the number of pages.');
         const spec = await aiJson([importPrompt(o, S.settings), ...parts], t => pg.step(t));
         pg.step('Cutting out pictures and building the paper…');
         const lang = o.lang !== 'auto' ? o.lang : (['af', 'en', 'bi'].includes(spec?.meta?.lang) ? spec.meta.lang : 'bi');
-        ({ blocks, notes } = await specToBlocks(spec, { lang, resolveFigure: figureResolver(files, shrunk, docxImages), resolvePicture: o.pictures ? commonsResolver(report) : null }));
+        ({ blocks, notes } = await specToBlocks(spec, { lang, resolveFigure: figureResolver(files, shrunk, docxImages), resolvePicture: (o.pictures || o.mode === 'variant') ? commonsResolver(report) : null }));
         meta = specMeta(spec, S.settings); meta.lang = lang;
         engine = 'ai';
       } else {
@@ -358,6 +364,7 @@ export async function pageImport(view) {
         grade: o.grade || meta.grade || (S.user.prefs || {}).grade || '5',
         lang: meta.lang, blocks, origin: { kind: 'imported', engine, mode: o.mode, file: files.map(f => f.name).join(', '), at: Date.now() }
       });
+      if (o.mode === 'variant' && engine === 'ai') { paper.title = (paper.title || 'Paper') + ' – new version'; paper.date = ''; }
       if (!meta.totalMarks) paper.totalMarks = analyse(paper, S.settings).total;
       if (!meta.educators) paper.educators = (S.user.prefs || {}).educators || displayName(S.user);
       if (o.pictures) await improvePictures(paper, report, pg);
@@ -380,7 +387,7 @@ function importResult(paper, notes, engine) {
   const ns = paper.blocks.filter(b => b.kind === 'source').length;
   const missing = notes.filter(n => n === 'missing-figure').length;
   const m = openModal({
-    title: 'Paper imported',
+    title: paper.origin.mode === 'variant' && engine === 'ai' ? 'New version created' : 'Paper imported',
     body: `<div class="imp-sum">
       <div><b>${nq}</b><span>questions</span></div><div><b>${a.total}</b><span>marks</span></div><div><b>${ns}</b><span>sources</span></div>
       <div><b class="${st.key === 'ok' ? 'st-ok' : 'st-low'}">${st.key === 'ok' ? '✓' : '!'}</b><span>${esc(st.label)}</span></div>
@@ -398,7 +405,7 @@ function importResult(paper, notes, engine) {
   });
   $$('[data-c]', m.el).forEach(b => b.onclick = async () => {
     const c = b.dataset.c;
-    if (c === 'edit') { m.close(); const ex = reportSummary(paper.origin.report || newReport()); openDraft(paper, `Imported from <b>${esc(paper.origin.file)}</b>${ex.length ? ' — ' + ex.join(', ') : ''}. Check the questions and Bloom's levels, then <b>Save Paper</b>.${hasReport(paper.origin.report) ? ' <button class="link-btn" data-report>View the update report</button>' : ''}`); }
+    if (c === 'edit') { m.close(); const ex = reportSummary(paper.origin.report || newReport()); openDraft(paper, `${paper.origin.mode === 'variant' && engine === 'ai' ? 'New version of' : 'Imported from'} <b>${esc(paper.origin.file)}</b>${ex.length ? ' — ' + ex.join(', ') : ''}. Check the questions and Bloom's levels, then <b>Save Paper</b>.${hasReport(paper.origin.report) ? ' <button class="link-btn" data-report>View the update report</button>' : ''}`); }
     else if (c === 'report') openUpdateReport(paper);
     else if (c === 'print') {
       try { paper.updatedAt = Date.now(); await store.savePaper(paper); await refreshMyPapers(); m.close(); toast('Paper saved.'); go('#/print/' + paper.id); }
