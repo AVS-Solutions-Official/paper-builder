@@ -1,0 +1,63 @@
+rules_version = '2';
+
+// Kathu Primary School Paper Builder — Firestore security rules.
+// Paste this into Firebase Console → Firestore Database → Rules → Publish.
+//
+// • Only signed-in users with a VERIFIED @kathuonline.com email can read or write.
+// • Teachers can only change or delete their own papers and bank questions.
+// • Only the admins listed below can change the school-wide Bloom's settings.
+//   Keep this list the same as ADMIN_EMAILS in js/config.js.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function schoolEmail() {
+      return signedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email.lower().matches('.*@kathuonline[.]com$');
+    }
+    function staff() {
+      return schoolEmail() && request.auth.token.email_verified == true;
+    }
+    function admin() {
+      return staff() && request.auth.token.email.lower() in [
+        'admin@kathuonline.com'
+      ];
+    }
+
+    // Teacher profiles (name, title, preferences)
+    match /users/{uid} {
+      allow read: if staff() || (schoolEmail() && request.auth.uid == uid);
+      allow create, update: if schoolEmail() && request.auth.uid == uid;
+      allow delete: if false;
+    }
+
+    // Question papers and templates — readable by all staff (for moderation
+    // and sharing), editable only by the teacher who created them.
+    match /papers/{paperId} {
+      allow read: if staff();
+      allow create: if staff() && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if staff()
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == request.auth.uid;
+      allow delete: if staff() && (resource.data.ownerUid == request.auth.uid || admin());
+    }
+
+    // Shared question bank
+    match /bank/{entryId} {
+      allow read: if staff();
+      allow create: if staff() && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if staff() && resource.data.ownerUid == request.auth.uid;
+      allow delete: if staff() && (resource.data.ownerUid == request.auth.uid || admin());
+    }
+
+    // School-wide Bloom's taxonomy targets
+    match /settings/{doc} {
+      allow read: if staff();
+      allow write: if admin();
+    }
+  }
+}
