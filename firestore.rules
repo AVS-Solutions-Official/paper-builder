@@ -54,6 +54,16 @@ service cloud.firestore {
       allow delete: if staff() && (resource.data.ownerUid == request.auth.uid || admin());
     }
 
+    // Pictures used on papers and in the bank (stored separately so papers stay small).
+    // The document id is a fingerprint of the picture, so the same picture is stored once.
+    match /images/{imageId} {
+      allow read: if staff();
+      allow create, update: if staff()
+        && request.resource.data.data is string
+        && request.resource.data.data.size() < 1000000;
+      allow delete: if admin();
+    }
+
     // School-wide Bloom's taxonomy targets
     match /settings/{doc} {
       allow read: if staff();

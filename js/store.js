@@ -6,6 +6,45 @@ const { FIREBASE_CONFIG, ALLOWED_DOMAIN, ADMIN_EMAILS } = CFG;
 // Older config.js files have no AI section — fall back to defaults.
 export const AI = { enabled: true, model: 'gemini-3.5-flash', recaptchaSiteKey: '', recaptchaType: 'enterprise', appCheckDebug: false, ...(CFG.AI || {}) };
 import { defaultSettings } from './bloom.js';
+import { drawChart } from './charts.js';
+
+// ───── Pictures are stored as separate database documents ("images/{id}"),
+// so a paper is never too large to save. Papers keep a short reference "img:<id>".
+const MAX_IMG_CHARS = 900000;
+async function sha(str) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(b)].slice(0, 16).map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function reencode(dataUrl, maxW, q) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const sc = Math.min(1, maxW / img.naturalWidth);
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * sc); c.height = Math.round(img.naturalHeight * sc);
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL('image/jpeg', q));
+    };
+    img.onerror = () => res(dataUrl);
+    img.src = dataUrl;
+  });
+}
+async function fitImage(d) {
+  if (d.length <= MAX_IMG_CHARS) return d;
+  for (const [w, q] of [[1800, 0.82], [1500, 0.78], [1200, 0.72], [1000, 0.65]]) {
+    d = await reencode(d, w, q);
+    if (d.length <= MAX_IMG_CHARS) return d;
+  }
+  return d;
+}
+// Blocks of a paper or bank entry (bank stores one block).
+const blocksOf = o => o.blocks || (o.block ? [o.block] : []);
+// Charts are redrawn from their numbers, so their picture is never stored.
+function redrawCharts(o) {
+  for (const b of blocksOf(o)) if (b.chart && !String(b.image || '').startsWith('data:')) { try { b.image = drawChart(b.chart); } catch {} }
+  return o;
+}
 
 export const isDemo = !FIREBASE_CONFIG.apiKey;
 export const FB_VERSION = '12.19.0';
@@ -167,6 +206,42 @@ async function createFirebase() {
   };
   const wrap = fn => async (...a) => { try { return await fn(...a); } catch (e) { throw friendly(e); } };
   const docs = snap => snap.docs.map(d => ({ id: d.id, ...unpackArrays(d.data()) }));
+  const knownImgs = new Set();
+  const imgCache = {};
+  // Move pictures out of the document before saving.
+  async function externalise(data, uid) {
+    for (const b of blocksOf(data)) {
+      if (b.chart) { delete b.image; continue; }
+      if (!String(b.image || '').startsWith('data:')) continue;
+      const d = await fitImage(b.image);
+      const id = await sha(d);
+      if (!knownImgs.has(id)) {
+        try { await F.setDoc(F.doc(db, 'images', id), { data: d, ownerUid: uid, createdAt: Date.now() }); }
+        catch (e) {
+          if (e.code === 'permission-denied') throw new Error('Pictures could not be saved: the database rules need updating. Paste the latest firestore.rules into Firebase → Firestore → Rules → Publish.');
+          throw e;
+        }
+        knownImgs.add(id); imgCache[id] = d;
+      }
+      b.image = 'img:' + id;
+    }
+    return data;
+  }
+  // Put the pictures back after loading.
+  async function resolveImages(o) {
+    if (!o) return o;
+    await Promise.all(blocksOf(o).map(async b => {
+      const m = String(b.image || '').match(/^img:(\w+)$/);
+      if (!m) return;
+      const id = m[1];
+      if (!imgCache[id]) {
+        try { const s = await F.getDoc(F.doc(db, 'images', id)); imgCache[id] = s.exists() ? s.data().data : ''; } catch { imgCache[id] = ''; }
+        knownImgs.add(id);
+      }
+      b.image = imgCache[id];
+    }));
+    return redrawCharts(o);
+  }
 
   return {
     mode: 'firebase',
@@ -210,18 +285,18 @@ async function createFirebase() {
         .filter(p => !!p.isTemplate === !!templates)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     }),
-    getPaper: wrap(async id => { const s = await F.getDoc(F.doc(db, 'papers', id)); return s.exists() ? { id: s.id, ...unpackArrays(s.data()) } : null; }),
+    getPaper: wrap(async id => { const s = await F.getDoc(F.doc(db, 'papers', id)); return s.exists() ? resolveImages({ id: s.id, ...unpackArrays(s.data()) }) : null; }),
     savePaper: wrap(async p => {
-      const data = toDb(p);
+      const data = await externalise(toDb(p), auth.currentUser?.uid || p.ownerUid);
       const size = new Blob([JSON.stringify(data)]).size;
-      if (size > 1000000) throw new Error(`This paper is too large to save (${Math.round(size / 1024)} KB, limit ≈ 1 000 KB). Remove or shrink some images.`);
+      if (size > 1000000) throw new Error(`This paper has too much text to save in one go (${Math.round(size / 1024)} KB). Split it into two papers.`);
       await F.setDoc(F.doc(db, 'papers', p.id), data);
       return p;
     }),
     deletePaper: wrap(id => F.deleteDoc(F.doc(db, 'papers', id))),
 
-    listBank: wrap(async () => docs(await F.getDocs(F.collection(db, 'bank'))).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))),
-    addBank: wrap(async e => { await F.setDoc(F.doc(db, 'bank', e.id), toDb(e)); return e; }),
+    listBank: wrap(async () => { const l = docs(await F.getDocs(F.collection(db, 'bank'))); await Promise.all(l.map(resolveImages)); return l.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); }),
+    addBank: wrap(async e => { await F.setDoc(F.doc(db, 'bank', e.id), await externalise(toDb(e), auth.currentUser?.uid || e.ownerUid)); return e; }),
     deleteBank: wrap(id => F.deleteDoc(F.doc(db, 'bank', id))),
 
     getSettings: wrap(async () => { const s = await F.getDoc(F.doc(db, 'settings', 'school')); return mergeSettings(s.exists() ? s.data() : null); }),
