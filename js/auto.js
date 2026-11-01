@@ -140,7 +140,7 @@ export async function pageCompile(view) {
   ['csub', 'ctot'].forEach(id => $('#' + id).addEventListener('input', drawTarget));
   drawTarget();
 
-  $('#cgo').onclick = async () => {
+  const runCompile = async (forceBasic = false) => {
     const o = {
       subject: $('#csub').value, grade: $('#cgr').value, lang: $('#clang').value,
       form: FORMS[Number($('#cform').value)], formEn: FORMS[Number($('#cform').value)].en.toLowerCase(),
@@ -154,7 +154,7 @@ export async function pageCompile(view) {
     const pg = progress('Compiling your paper');
     try {
       let blocks, engine, meta = {};
-      if (aiAvailable()) {
+      if (aiAvailable() && !forceBasic) {
         const { parts, text } = await filesToParts(files, t => pg.step(t));
         o.text = [o.text, text].filter(Boolean).join('\n\n').slice(0, 250000);
         pg.step('Gemini is writing the questions…', 'Usually 20–60 seconds.');
@@ -184,9 +184,11 @@ export async function pageCompile(view) {
       openDraft(paper, `${engine === 'ai' ? 'Compiled by AI' : 'Compiled by the basic generator'} from your study material — ${a.total} marks${a.total !== o.totalMarks ? ` (you asked for ${o.totalMarks})` : ''}. Check every question, answer and Bloom's level, then <b>Save Paper</b>.`);
     } catch (e) {
       pg.close(); console.error(e);
-      toast(e.message, 'err', 8000);
+      if (aiAvailable() && !forceBasic && /AI|Gemini|App Check|limit/i.test(e.message)) aiFailed(e.message, () => runCompile(true));
+      else toast(e.message, 'err', 8000);
     }
   };
+  $('#cgo').onclick = () => runCompile(false);
 }
 
 // ───────────────────────────── Import Paper ─────────────────────────────
@@ -222,7 +224,7 @@ export async function pageImport(view) {
   </div>`;
   filePicker($('#ifiles', view), files, {});
 
-  $('#igo').onclick = async () => {
+  const runImport = async (forceBasic = false) => {
     if (!files.length) return toast('Add the paper file(s) first.', 'err');
     const o = {
       mode: view.querySelector('[name=imode]:checked').value, subject: $('#isub').value, grade: $('#igr').value,
@@ -231,7 +233,7 @@ export async function pageImport(view) {
     const pg = progress('Importing your paper');
     try {
       let blocks, meta = {}, notes = [], engine;
-      if (ai) {
+      if (ai && !forceBasic) {
         const { parts, text, docxImages, shrunk } = await filesToParts(files, t => pg.step(t));
         o.text = text.slice(0, 250000);
         pg.step(o.mode === 'keep' ? 'Gemini is reading the paper…' : o.mode === 'fix' ? 'Gemini is reading and tidying the paper…' : 'Gemini is reading and rebalancing the paper…', 'Usually 20–90 seconds, depending on the number of pages.');
@@ -269,6 +271,7 @@ export async function pageImport(view) {
         blocks.forEach(b => { if (b.kind === 'question' && b.instr && lang === 'en') b.instr = { af: '', en: b.instr.af }; });
         engine = 'basic';
       }
+      if (forceBasic) o.mode = 'keep';
       const qs = blocks.filter(b => b.kind === 'question');
       if (!qs.length) throw new Error(engine === 'basic'
         ? 'No questions were recognised. The basic importer looks for headings like "VRAAG 1" / "QUESTION 1" and numbers like 1.1 with marks in brackets (2). Scanned papers need the AI features.'
@@ -285,9 +288,11 @@ export async function pageImport(view) {
       importResult(paper, notes, engine);
     } catch (e) {
       pg.close(); console.error(e);
-      toast(e.message, 'err', 9000);
+      if (ai && !forceBasic && /AI|Gemini|App Check|limit/i.test(e.message) && files.every(f => ['pdf', 'docx', 'text'].includes(fileKind(f)))) aiFailed(e.message, () => runImport(true));
+      else toast(e.message, 'err', 9000);
     }
   };
+  $('#igo').onclick = () => runImport(false);
 }
 
 function importResult(paper, notes, engine) {
@@ -320,4 +325,17 @@ function importResult(paper, notes, engine) {
       catch (e) { toast(e.message, 'err'); }
     } else if (c === 'bloom') openModal({ title: "Bloom's analysis", wide: true, body: `<div style="overflow-x:auto">${renderAnalysis(paper, S.settings, displayName(S.user))}</div>` });
   });
+}
+
+// When the AI service fails, explain and offer the built-in (no-AI) version.
+function aiFailed(msg, retryBasic) {
+  const [main, tech] = msg.split(' (Technical detail:');
+  const m = openModal({
+    title: 'The AI could not do this right now',
+    body: `<p style="margin-top:0">${esc(main)}</p>
+      ${tech ? `<details><summary class="small muted" style="cursor:pointer">Technical detail (for your administrator)</summary><p class="small muted">${esc(tech.replace(/\)$/, ''))}</p></details>` : ''}
+      <div class="note" style="margin-top:12px">${icon('info', 15)} <span>You can still continue with the <b>built-in generator</b>. It works without AI, but writes simpler questions and can only read typed text, Word files and text-based PDFs.</span></div>`,
+    footer: `<button class="btn btn-ghost" data-close>Close</button><button class="btn btn-gold" id="usebasic">Use the built-in generator</button>`
+  });
+  $('#usebasic', m.el).onclick = () => { m.close(); retryBasic(); };
 }

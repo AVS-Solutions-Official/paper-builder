@@ -40,6 +40,7 @@ function friendly(e) {
   const tech = ` (Technical detail: ${st || ''} ${detail} ${raw})`;
   if (/app.?check|attestation|recaptcha/i.test(m) || /APP_CHECK/i.test(detail)) return 'The AI service refused the request because the App Check visitor check failed. Check that the reCAPTCHA key is registered in Firebase → Security → App Check, then reload the page.' + tech;
   if (st === 429 || /RESOURCE_EXHAUSTED|quota exceeded|rate.?limit/i.test(m)) return 'The free AI limit was reached (too much material at once, or too many requests in a minute). Wait 1–2 minutes and try again with fewer files — e.g. only the English OR only the Afrikaans notes.' + tech;
+  if (/free tier is not available|set up billing|billing/i.test(m)) return 'Google has not given this project free access to the AI. To use the AI, the administrator must link a billing account in Firebase (Blaze plan, pay-as-you-go — a paper costs well under R2). Until then, use the built-in generator.' + tech;
   if (st === 403 || /SERVICE_DISABLED|has not been used|API_KEY_SERVICE_BLOCKED/i.test(m)) return 'Firebase AI Logic is not switched on for this project yet. In the Firebase console open AI services → AI Logic → Get started → Gemini Developer API.' + tech;
   if (st === 404) return `The AI model "${AI.model}" is not available. It may have been renamed — tell your app administrator.` + tech;
   if (st === 413 || /payload|too large/i.test(m)) return 'The files are too large to send in one go. Try fewer pages or smaller files.' + tech;
