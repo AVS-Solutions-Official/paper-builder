@@ -14,9 +14,10 @@ export const ADMIN_EMAILS = [
 ];
 
 export const AI = {
-  enabled: false,
+  enabled: true,
   model: "gemini-3.5-flash",
-  recaptchaSiteKey: "",
+  recaptchaSiteKey: "6Lf_wgouAAAAAHLPISrjUnLwSeJvCx_zcIr-SYwJ",
+  recaptchaType: "enterprise",
   appCheckDebug: false
 };
 
