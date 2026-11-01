@@ -22,11 +22,16 @@ let pendingDraft = null;
 // Open an unsaved, generated/imported paper in the editor.
 export function openDraft(paper, banner) {
   pendingDraft = { paper, banner };
+  try { sessionStorage.setItem('kps_draft', JSON.stringify(pendingDraft)); } catch {}
   go('#/create?draft=' + paper.id);
 }
 
 export async function renderEditor(view, { id, template, asTemplate, bank, draft } = {}) {
   let paper, isNew = false, banner = '', dirty = false;
+  if (draft && (!pendingDraft || pendingDraft.paper.id !== draft)) {
+    // Page was reloaded: recover the unsaved generated/imported paper.
+    try { const d = JSON.parse(sessionStorage.getItem('kps_draft') || 'null'); if (d && d.paper.id === draft) pendingDraft = d; } catch {}
+  }
   if (draft && pendingDraft && pendingDraft.paper.id === draft) {
     paper = pendingDraft.paper; banner = pendingDraft.banner; isNew = true; dirty = true;
   } else if (id) {

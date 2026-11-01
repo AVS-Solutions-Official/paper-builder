@@ -24,6 +24,23 @@ export function newId() {
 }
 const clean = o => JSON.parse(JSON.stringify(o)); // strips undefined (Firestore rejects it)
 
+// Firestore cannot store an array directly inside another array (e.g. table rows).
+// Wrap inner arrays as { __a: [...] } when saving and unwrap them when reading.
+export function packArrays(v, inArray = false) {
+  if (Array.isArray(v)) { const a = v.map(x => packArrays(x, true)); return inArray ? { __a: a } : a; }
+  if (v && typeof v === 'object') { const o = {}; for (const k in v) o[k] = packArrays(v[k], false); return o; }
+  return v;
+}
+export function unpackArrays(v) {
+  if (Array.isArray(v)) return v.map(unpackArrays);
+  if (v && typeof v === 'object') {
+    if (Object.keys(v).length === 1 && Array.isArray(v.__a)) return v.__a.map(unpackArrays);
+    const o = {}; for (const k in v) o[k] = unpackArrays(v[k]); return o;
+  }
+  return v;
+}
+const toDb = o => packArrays(clean(o));
+
 export function mergeSettings(s) {
   const d = defaultSettings();
   if (!s) return d;
@@ -149,7 +166,7 @@ async function createFirebase() {
     return new Error(m[e.code] || e.message);
   };
   const wrap = fn => async (...a) => { try { return await fn(...a); } catch (e) { throw friendly(e); } };
-  const docs = snap => snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const docs = snap => snap.docs.map(d => ({ id: d.id, ...unpackArrays(d.data()) }));
 
   return {
     mode: 'firebase',
@@ -193,9 +210,9 @@ async function createFirebase() {
         .filter(p => !!p.isTemplate === !!templates)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     }),
-    getPaper: wrap(async id => { const s = await F.getDoc(F.doc(db, 'papers', id)); return s.exists() ? { id: s.id, ...s.data() } : null; }),
+    getPaper: wrap(async id => { const s = await F.getDoc(F.doc(db, 'papers', id)); return s.exists() ? { id: s.id, ...unpackArrays(s.data()) } : null; }),
     savePaper: wrap(async p => {
-      const data = clean(p);
+      const data = toDb(p);
       const size = new Blob([JSON.stringify(data)]).size;
       if (size > 1000000) throw new Error(`This paper is too large to save (${Math.round(size / 1024)} KB, limit ≈ 1 000 KB). Remove or shrink some images.`);
       await F.setDoc(F.doc(db, 'papers', p.id), data);
@@ -204,7 +221,7 @@ async function createFirebase() {
     deletePaper: wrap(id => F.deleteDoc(F.doc(db, 'papers', id))),
 
     listBank: wrap(async () => docs(await F.getDocs(F.collection(db, 'bank'))).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))),
-    addBank: wrap(async e => { await F.setDoc(F.doc(db, 'bank', e.id), clean(e)); return e; }),
+    addBank: wrap(async e => { await F.setDoc(F.doc(db, 'bank', e.id), toDb(e)); return e; }),
     deleteBank: wrap(id => F.deleteDoc(F.doc(db, 'bank', id))),
 
     getSettings: wrap(async () => { const s = await F.getDoc(F.doc(db, 'settings', 'school')); return mergeSettings(s.exists() ? s.data() : null); }),
